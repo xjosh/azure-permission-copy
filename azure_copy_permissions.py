@@ -477,13 +477,25 @@ def copy_app_role_assignments(
 #   Write : RoleManagement.ReadWrite.Directory
 # ---------------------------------------------------------------------------
 
-def _graph_beta_get_all(token_provider: TokenProvider, path: str, params: dict = None) -> list:
-    """Follow @odata.nextLink pages against the Graph *beta* endpoint."""
+def _graph_beta_get_all(
+    token_provider: TokenProvider,
+    path: str,
+    params: dict = None,
+    consistency_level: str = None,
+) -> list:
+    """Follow @odata.nextLink pages against the Graph *beta* endpoint.
+
+    Pass consistency_level='eventual' for endpoints that require advanced query
+    support (e.g. transitiveRoleAssignments), which also need $count=true.
+    """
     results = []
     url = f"{GRAPH_BETA_BASE}{path}"
+    headers = token_provider.headers(GRAPH_SCOPE)
+    if consistency_level:
+        headers = {**headers, "ConsistencyLevel": consistency_level}
     while url:
         log.debug("GRAPH BETA GET (paged) %s", url)
-        resp = requests.get(url, headers=token_provider.headers(GRAPH_SCOPE), params=params, timeout=30)
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         results.extend(data.get("value", []))
@@ -518,10 +530,13 @@ def get_directory_role_assignments(token_provider: TokenProvider, object_id: str
     Each item has: id, principalId, roleDefinitionId, directoryScopeId,
     memberType ('Direct' or 'Group'), and _roleName (resolved display name).
     """
+    # transitiveRoleAssignments requires advanced query support:
+    # ConsistencyLevel: eventual header + $count=true query param.
     assignments = _graph_beta_get_all(
         token_provider,
         "/roleManagement/directory/transitiveRoleAssignments",
-        params={"$filter": f"principalId eq '{object_id}'"},
+        params={"$filter": f"principalId eq '{object_id}'", "$count": "true"},
+        consistency_level="eventual",
     )
     for a in assignments:
         a["_roleName"] = _resolve_directory_role_name(token_provider, a["roleDefinitionId"])
