@@ -95,15 +95,19 @@ class CopyResult:
     found: int = 0
     copied: int = 0
     skipped_existing: int = 0
+    skipped_transitive: int = 0
     errors: list = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
+        parts = (
             f"[{self.category}] found={self.found}  "
             f"copied={self.copied}  "
             f"skipped_existing={self.skipped_existing}  "
             f"errors={len(self.errors)}"
         )
+        if self.skipped_transitive:
+            parts += f"  skipped_transitive={self.skipped_transitive}"
+        return parts
 
 
 # ---------------------------------------------------------------------------
@@ -111,17 +115,15 @@ class CopyResult:
 # ---------------------------------------------------------------------------
 
 class TokenProvider:
-    """Wraps a credential and caches tokens per scope."""
+    """Wraps a credential and delegates token acquisition to the Azure SDK."""
 
     def __init__(self, credential) -> None:
         self._cred = credential
-        self._cache: dict[str, str] = {}
 
     def get(self, scope: str) -> str:
-        if scope not in self._cache:
-            token = self._cred.get_token(scope)
-            self._cache[scope] = token.token
-        return self._cache[scope]
+        # Always delegate to the SDK — it handles caching and refresh internally.
+        # Caching the raw token string here would cause 401s after the ~1 hr expiry.
+        return self._cred.get_token(scope).token
 
     def headers(self, scope: str) -> dict:
         return {"Authorization": f"Bearer {self.get(scope)}",
@@ -264,8 +266,10 @@ def copy_rbac_assignments(
     result = CopyResult(category="RBAC")
     result.found = len(assignments)
 
-    # Pre-fetch existing assignments for the target so we can skip dupes
-    existing_keys = set()
+    # Pre-fetch existing assignments for the target so we can skip dupes.
+    # Track which scopes we've already loaded to avoid redundant API calls.
+    existing_keys: set = set()
+    loaded_scopes: set = set()
     headers = token_provider.headers(ARM_SCOPE)
 
     for ra in assignments:
@@ -274,16 +278,21 @@ def copy_rbac_assignments(
         role_name = ra.get("_roleName", role_def_id)
         key = (scope, role_def_id)
 
-        # Lazy-load existing assignments for this scope on first encounter
-        if key not in existing_keys:
-            # Check if target already has this role at this scope
+        # Lazy-load all of the target's existing assignments at this scope (once per scope).
+        # Follow nextLink pagination so no existing assignments are missed.
+        if scope not in loaded_scopes:
+            loaded_scopes.add(scope)
             check_url = (f"{ARM_BASE}{scope}/providers/Microsoft.Authorization/roleAssignments"
                          f"?api-version=2022-04-01&$filter=assignedTo('{to_id}')")
-            check_resp = requests.get(check_url, headers=headers, timeout=30)
-            if check_resp.ok:
-                for existing in check_resp.json().get("value", []):
+            while check_url:
+                check_resp = requests.get(check_url, headers=headers, timeout=30)
+                if not check_resp.ok:
+                    break
+                page = check_resp.json()
+                for existing in page.get("value", []):
                     ep = existing["properties"]
                     existing_keys.add((ep["scope"], ep["roleDefinitionId"]))
+                check_url = page.get("nextLink")
 
         if key in existing_keys:
             log.info("  SKIP (already assigned): %s @ %s", role_name, scope)
@@ -586,7 +595,7 @@ def copy_directory_role_assignments(
             log.info(
                 "  SKIP (transitive via group/PIM — copy groups to replicate): %s", role_name
             )
-            result.skipped_existing += 1
+            result.skipped_transitive += 1
             continue
 
         key = (role_def_id, scope_id)
