@@ -1,0 +1,18 @@
+# azure_copy_permissions.py — Python dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Minimum Python version: 3.10 (uses match-less union types; 3.9 compatible with minor tweaks)
+
+# Azure authentication — supports env vars, Managed Identity, CLI, browser
+azure-identity>=1.15.0
+
+# Azure RBAC role assignment read/write via ARM
+azure-mgmt-authorization>=3.0.0
+
+# Subscription enumeration (listing all accessible subscriptions)
+azure-mgmt-subscription>=3.1.1
+
+# HTTP client for Microsoft Graph and ARM REST calls
+requests>=2.31.0
